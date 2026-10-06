@@ -140,6 +140,7 @@ jobs:
       - name: Télécharger et envoyer lot par lot
         run: |
           set -uo pipefail
+          set +e   # GitHub lance bash avec -e : on le coupe pour gérer les erreurs nous-mêmes
           TORRENT=$(cat work/torrent.txt)
 
           # Erreurs de connexion/blocage : on s'arrête net, on ne réessaie JAMAIS
@@ -163,6 +164,7 @@ jobs:
             chmod 600 ~/.megarc
             # Création du dossier une seule fois (une seule connexion ici)
             out=$(megatools mkdir "/Root/$DOSSIER" </dev/null 2>&1)
+            echo "mkdir MEGA : ${out:-OK}"
             if is_fatal "$out"; then echo "$out"; echo "Connexion MEGA refusée : arrêt"; exit 1; fi
           fi
 
