@@ -1,4 +1,4 @@
-name: Transfert vers MEGA
+name: Transfert vers MEGA / MediaFire
 
 on:
   workflow_dispatch:
@@ -6,10 +6,30 @@ on:
       url:
         description: "Lien direct, magnet: ou URL d'un .torrent"
         required: true
+      destination:
+        description: "Où envoyer les fichiers"
+        type: choice
+        options:
+          - mega
+          - mediafire
+          - les deux
+        default: mega
+      lister:
+        description: "Lister seulement les fichiers du torrent (sans rien télécharger)"
+        type: boolean
+        default: false
+      fichiers:
+        description: "Numéros des fichiers à télécharger (ex: 5 ou 1,3 ou 2-4). Vide = tout"
+        required: false
+        default: ""
       dossier:
         description: "Dossier de destination sur MEGA"
         required: false
         default: "/Root/Videos"
+      dossier_mediafire:
+        description: "Dossier de destination sur MediaFire"
+        required: false
+        default: "Videos"
 
 jobs:
   transfer:
@@ -17,16 +37,39 @@ jobs:
     timeout-minutes: 350
     steps:
       - name: Installer les outils
-        run: sudo apt-get update && sudo apt-get install -y aria2 megatools
+        run: |
+          sudo apt-get update && sudo apt-get install -y aria2 megatools
+          pip install mediafire
 
-      - name: Télécharger
+      - name: Lister les fichiers du torrent
+        if: ${{ inputs.lister }}
         env:
           URL: ${{ inputs.url }}
         run: |
+          mkdir -p meta
+          if [[ "$URL" == magnet:* ]]; then
+            aria2c --bt-metadata-only=true --bt-save-metadata=true -d meta "$URL"
+          else
+            aria2c --follow-torrent=false -d meta "$URL"
+          fi
+          echo "=========== LISTE DES FICHIERS (numéro | nom | taille) ==========="
+          aria2c -S meta/*.torrent
+
+      - name: Télécharger
+        if: ${{ !inputs.lister }}
+        env:
+          URL: ${{ inputs.url }}
+          FICHIERS: ${{ inputs.fichiers }}
+        run: |
           mkdir -p dl
-          aria2c --seed-time=0 -x 16 -s 16 --summary-interval=30 -d dl "$URL"
+          ARGS=""
+          if [ -n "$FICHIERS" ]; then
+            ARGS="--select-file=$FICHIERS"
+          fi
+          aria2c $ARGS --seed-time=0 -x 16 -s 16 --summary-interval=30 -d dl "$URL"
 
       - name: Envoyer sur MEGA
+        if: ${{ !inputs.lister && (inputs.destination == 'mega' || inputs.destination == 'les deux') }}
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
@@ -35,3 +78,48 @@ jobs:
           megatools mkdir -u "$MEGA_EMAIL" -p "$MEGA_PASSWORD" "$DEST" || true
           megatools copy --no-progress -u "$MEGA_EMAIL" -p "$MEGA_PASSWORD" \
             --local dl --remote "$DEST"
+
+      - name: Envoyer sur MediaFire
+        if: ${{ !inputs.lister && (inputs.destination == 'mediafire' || inputs.destination == 'les deux') }}
+        env:
+          MF_EMAIL: ${{ secrets.MEDIAFIRE_EMAIL }}
+          MF_PASSWORD: ${{ secrets.MEDIAFIRE_PASSWORD }}
+          MF_DEST: ${{ inputs.dossier_mediafire }}
+        run: |
+          python3 - << 'PY'
+          import os, sys
+          from mediafire.client import MediaFireClient
+
+          client = MediaFireClient()
+          client.login(email=os.environ["MF_EMAIL"],
+                       password=os.environ["MF_PASSWORD"],
+                       app_id="42511")
+
+          def ensure(parts):
+              path = "mf:"
+              for p in parts:
+                  path += "/" + p
+                  try:
+                      client.create_folder(path)
+                  except Exception as e:
+                      print("(dossier déjà là ou ignoré)", path, "-", e)
+              return path
+
+          base_parts = [p for p in os.environ["MF_DEST"].strip("/").split("/") if p]
+          count = 0
+          for root, _, files in os.walk("dl"):
+              rel = os.path.relpath(root, "dl")
+              sub = [] if rel == "." else rel.split(os.sep)
+              target = ensure(base_parts + sub)
+              for name in files:
+                  if name.endswith(".aria2"):
+                      continue
+                  local = os.path.join(root, name)
+                  print("Envoi:", local, "->", target, flush=True)
+                  client.upload_file(local, target + "/")
+                  count += 1
+
+          if count == 0:
+              sys.exit("Aucun fichier à envoyer")
+          print("Terminé:", count, "fichier(s) envoyé(s) sur MediaFire")
+          PY
