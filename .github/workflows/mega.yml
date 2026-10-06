@@ -1,209 +1,56 @@
-name: Transfert MEGA / MediaFire
+name: Download to MEGA
 
 on:
   workflow_dispatch:
     inputs:
-      source:
-        description: "Magnet, URL .torrent ou lien(s) direct(s) séparés par un espace"
+      url:
+        description: "Lien direct, lien .torrent ou magnet"
         required: true
-      fichiers:
-        description: "Torrent : numéros à garder (ex: 1,3,5-8). Vide = tous"
-        required: false
-        default: ""
-      destination:
-        description: "Où envoyer"
-        type: choice
-        options: [mega, mediafire, les-deux]
-        default: mega
-      dossier:
-        description: "Dossier de destination"
-        default: "Uploads"
-
-# Un seul transfert à la fois : évite les connexions MEGA en parallèle
-concurrency:
-  group: transfert-cloud
-  cancel-in-progress: false
+      mega_folder:
+        description: "Dossier de destination sur MEGA"
+        required: true
+        default: "Videos"
+      max_gb:
+        description: "Taille max par partie (Go)"
+        required: true
+        default: "10"
 
 jobs:
-  transfert:
+  transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
-    env:
-      SOURCE: ${{ inputs.source }}
-      FICHIERS: ${{ inputs.fichiers }}
-      DEST: ${{ inputs.destination }}
-      DOSSIER: ${{ inputs.dossier }}
-      MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-      MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
-      MF_EMAIL: ${{ secrets.MEDIAFIRE_EMAIL }}
-      MF_PASSWORD: ${{ secrets.MEDIAFIRE_PASSWORD }}
-
+    timeout-minutes: 360
     steps:
-      - name: Libérer de la place (~30 Go en plus)
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
+      - uses: actions/checkout@v4
 
       - name: Installer les outils
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 megatools
-          pip install -q bencodepy mediafire
+          sudo apt-get update
+          sudo apt-get install -y aria2 megatools
 
-      - name: Préparer la liste des fichiers
+      - name: Configurer MEGA
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          mkdir -p work dl
+          printf "[Login]\nUsername = %s\nPassword = %s\n" "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
+          chmod 600 ~/.megarc
 
-          cat > batch.py <<'PY'
-          import sys
-          import bencodepy
-
-          src, sel = sys.argv[1], sys.argv[2]
-          is_torrent = src.endswith(".torrent")
-
-          def parse_sel(s):
-              out = set()
-              for p in s.replace(" ", "").split(","):
-                  if p:
-                      a, _, b = p.partition("-")
-                      out.update(range(int(a), int(b or a) + 1))
-              return out
-
-          # Un fichier = une ligne = un lot
-          if is_torrent:
-              info = bencodepy.decode_from_file(src)[b"info"]
-              fl = info.get(b"files")
-              n = len(fl) if fl else 1
-              ids = list(range(1, n + 1))
-              if sel:
-                  keep = parse_sel(sel)
-                  ids = [i for i in ids if i in keep]
-          else:
-              ids = src.split()
-
-          for i, ident in enumerate(ids, 1):
-              print(f"Fichier {i}/{len(ids)} : {ident}", file=sys.stderr)
-              print(ident)
-          PY
-
-          cat > upload_mf.py <<'PY'
-          import os, sys
-          from mediafire import MediaFireClient
-
-          client = MediaFireClient()
-          client.login(email=os.environ["MF_EMAIL"], password=os.environ["MF_PASSWORD"], app_id="42511")
-          base = "mf:/" + sys.argv[1].strip("/")
-          for root, _, files in os.walk("dl"):
-              rel = os.path.relpath(root, "dl")
-              dest = base if rel == "." else base + "/" + rel
-              try:
-                  client.create_folder(dest, recursive=True)
-              except Exception:
-                  pass
-              for f in files:
-                  client.upload_file(os.path.join(root, f), dest + "/")
-          PY
-
-          cd work
-          TORRENT=""
-          if [[ "$SOURCE" == magnet:* ]]; then
-            aria2c --bt-metadata-only=true --bt-save-metadata=true --seed-time=0 -d . "$SOURCE"
-            TORRENT=$(ls -1 *.torrent | head -1)
-          elif [[ "$SOURCE" == *.torrent* ]]; then
-            aria2c -o source.torrent "$SOURCE"
-            TORRENT=source.torrent
-          fi
-          echo "$TORRENT" > torrent.txt
-
-          python3 ../batch.py "${TORRENT:-$SOURCE}" "$FICHIERS" > batches.txt
-          [ -s batches.txt ] || { echo "Aucun fichier à transférer"; exit 1; }
-
-      - name: Télécharger et envoyer fichier par fichier
+      - name: Télécharger
+        env:
+          URL: ${{ inputs.url }}
         run: |
-          set -uo pipefail
-          set +e   # GitHub lance bash avec -e : on le coupe pour gérer les erreurs nous-mêmes
-          TORRENT=$(cat work/torrent.txt)
+          mkdir -p downloads
+          aria2c --dir=downloads \
+            --seed-time=0 \
+            --file-allocation=none \
+            --max-connection-per-server=16 --split=16 \
+            --bt-stop-timeout=600 \
+            --summary-interval=30 \
+            "$URL"
+          df -h .
 
-          # Erreurs de connexion/blocage : on s'arrête net, on ne réessaie JAMAIS
-          is_fatal() { grep -qiE "blocked|EBLOCKED|EACCESS|login|credential|bad (user|password)" <<<"$1"; }
-
-          # Envoie chaque fichier de dl/ en recréant les sous-dossiers sur MEGA
-          upload_mega() {
-            local out t f rel d bad=0 sent
-            while IFS= read -r -d '' f; do
-              rel=$(dirname "${f#dl/}")
-              if [ "$rel" = "." ]; then
-                d="/Root/$DOSSIER"
-              else
-                d="/Root/$DOSSIER/$rel"
-                megatools mkdir "$d" </dev/null >/dev/null 2>&1
-              fi
-              echo "Envoi : $f"
-              sent=0
-              for t in 1 2 3; do
-                if out=$(megatools put --no-progress --path "$d" "$f" </dev/null 2>&1); then
-                  sent=1; break
-                fi
-                if grep -qi "already exists" <<<"$out"; then
-                  echo "Déjà présent sur MEGA : on passe"
-                  sent=1; break
-                fi
-                echo "$out" | tail -3
-                if is_fatal "$out"; then return 2; fi
-                [ $t -lt 3 ] && sleep $((t * 90))
-              done
-              [ $sent -eq 1 ] || bad=1
-            done < <(find dl -type f -print0)
-            return $bad
-          }
-
-          if [[ "$DEST" != mediafire ]]; then
-            printf '[Login]\nUsername = %s\nPassword = %s\n' "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
-            chmod 600 ~/.megarc
-            # Création du dossier une seule fois (une seule connexion ici)
-            out=$(megatools mkdir "/Root/$DOSSIER" </dev/null 2>&1)
-            echo "mkdir MEGA : ${out:-OK}"
-            if is_fatal "$out"; then echo "$out"; echo "Connexion MEGA refusée : arrêt"; exit 1; fi
-          fi
-
-          OK=0; FAIL=0; N=0
-          while IFS= read -r LOT <&3; do
-            N=$((N + 1))
-            echo "=== Fichier $N : $LOT"
-            rm -rf dl/*
-
-            # 1) Télécharger CE fichier seulement
-            if [ -n "$TORRENT" ]; then
-              aria2c -d dl --seed-time=0 --file-allocation=none \
-                --bt-stop-timeout=900 --summary-interval=120 \
-                --select-file="$LOT" "work/$TORRENT" </dev/null || { echo "Échec téléchargement"; FAIL=$((FAIL + 1)); continue; }
-            else
-              aria2c -d dl -x16 -s16 --summary-interval=120 "$LOT" </dev/null || { echo "Échec : $LOT"; FAIL=$((FAIL + 1)); continue; }
-            fi
-            find dl -name '*.aria2' -delete
-            du -sh dl
-
-            # 2) L'envoyer
-            ok=1
-            if [[ "$DEST" != mediafire ]]; then
-              upload_mega; rc=$?
-              if [ $rc -eq 2 ]; then echo "Compte MEGA bloqué ou login refusé : arrêt"; exit 1; fi
-              [ $rc -ne 0 ] && ok=0
-            fi
-            if [[ "$DEST" != mega ]]; then
-              python3 upload_mf.py "$DOSSIER" || ok=0
-            fi
-
-            if [ $ok -eq 1 ]; then OK=$((OK + 1)); else FAIL=$((FAIL + 1)); fi
-
-            # 3) Supprimer, puis fichier suivant
-            rm -rf dl/*
-            sleep 10
-          done 3< work/batches.txt
-
-          echo "Terminé : $OK fichier(s) OK, $FAIL en échec sur $N"
-          [ $FAIL -eq 0 ]
-
-      - name: Nettoyage
-        if: always()
-        run: rm -f ~/.megarc
+      - name: Découper en parties et envoyer sur MEGA
+        env:
+          MEGA_FOLDER: ${{ inputs.mega_folder }}
+          MAX_GB: ${{ inputs.max_gb }}
+        run: python3 scripts/upload_batches.py downloads
