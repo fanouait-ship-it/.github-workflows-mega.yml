@@ -149,7 +149,9 @@ jobs:
           upload_mega() {
             local out t
             for t in 1 2 3; do
-              if out=$(megatools put --no-progress --path "/Root/$DOSSIER" dl/* </dev/null 2>&1); then
+              # CORRECTION : "copy" envoie le dossier dl récursivement
+              # (avant : "put dl/*" échouait car dl/* contient un dossier)
+              if out=$(megatools copy --no-progress --local dl --remote "/Root/$DOSSIER" </dev/null 2>&1); then
                 return 0
               fi
               echo "$out" | tail -3
