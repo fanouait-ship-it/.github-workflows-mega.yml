@@ -4,16 +4,28 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Lien direct, lien .torrent ou magnet"
+        description: "Lien direct, .torrent, magnet ou .m3u8"
         required: true
       mega_folder:
         description: "Dossier de destination sur MEGA"
         required: true
         default: "Videos"
-      max_gb:
-        description: "Taille max par partie (Go)"
-        required: true
-        default: "10"
+      list_only:
+        description: "Torrent : lister les fichiers (numéros) sans télécharger"
+        type: boolean
+        default: false
+      select_files:
+        description: "Torrent : numéros à télécharger (ex: 3 ou 1,4,7 ou 2-5,9). Vide = tout"
+        required: false
+        default: ""
+      filename:
+        description: "m3u8 : nom du fichier de sortie (sans extension)"
+        required: false
+        default: "video"
+      referer:
+        description: "m3u8 : Referer si le site l'exige (optionnel)"
+        required: false
+        default: ""
 
 jobs:
   transfer:
@@ -23,9 +35,29 @@ jobs:
       - name: Installer les outils
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 megatools
+          sudo apt-get install -y aria2 megatools ffmpeg
+
+      - name: Lister les fichiers du torrent
+        if: ${{ inputs.list_only }}
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          mkdir -p meta
+          case "$URL" in
+            magnet:*)
+              aria2c --dir=meta --bt-metadata-only=true --bt-save-metadata=true \
+                --bt-stop-timeout=300 "$URL"
+              ;;
+            *)
+              aria2c --dir=meta --follow-torrent=false "$URL"
+              ;;
+          esac
+          for t in meta/*.torrent; do
+            aria2c -S "$t"
+          done
 
       - name: Configurer MEGA
+        if: ${{ !inputs.list_only }}
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
@@ -34,23 +66,35 @@ jobs:
           chmod 600 ~/.megarc
 
       - name: Télécharger
+        if: ${{ !inputs.list_only }}
         env:
           URL: ${{ inputs.url }}
+          SELECT: ${{ inputs.select_files }}
+          NAME: ${{ inputs.filename }}
+          REFERER: ${{ inputs.referer }}
         run: |
           mkdir -p downloads
-          aria2c --dir=downloads \
-            --seed-time=0 \
-            --file-allocation=none \
-            --max-connection-per-server=16 --split=16 \
-            --bt-stop-timeout=600 \
-            --summary-interval=30 \
-            "$URL"
+          case "$URL" in
+            *.m3u8*)
+              echo "Flux HLS détecté -> ffmpeg"
+              args=(-nostdin -loglevel warning -stats -user_agent "Mozilla/5.0")
+              [ -n "$REFERER" ] && args+=(-referer "$REFERER")
+              ffmpeg "${args[@]}" -i "$URL" -c copy "downloads/${NAME:-video}.mp4"
+              ;;
+            *)
+              args=(--dir=downloads --seed-time=0 --file-allocation=none
+                    --max-connection-per-server=16 --split=16
+                    --bt-stop-timeout=600 --summary-interval=30)
+              [ -n "$SELECT" ] && args+=(--select-file="$SELECT")
+              aria2c "${args[@]}" "$URL"
+              ;;
+          esac
           df -h .
 
-      - name: Découper en parties et envoyer sur MEGA
+      - name: Envoyer sur MEGA
+        if: ${{ !inputs.list_only }}
         env:
           MEGA_FOLDER: ${{ inputs.mega_folder }}
-          MAX_GB: ${{ inputs.max_gb }}
         run: |
           cat > upload.py << 'PYEOF'
           import os
@@ -59,7 +103,6 @@ jobs:
 
           root = "downloads"
           dest = "/Root/" + os.environ["MEGA_FOLDER"].strip("/")
-          max_bytes = float(os.environ.get("MAX_GB", "10")) * 1024**3
 
           files = []
           for d, _, names in os.walk(root):
@@ -73,34 +116,17 @@ jobs:
           if not files:
               sys.exit("Aucun fichier téléchargé.")
 
-          # Regroupement : un fichier n'est jamais découpé
-          batches, current, size = [], [], 0
+          print(f"{len(files)} fichier(s) à envoyer vers {dest}")
+          subprocess.run(["megatools", "mkdir", dest], check=False)
+
           for p, s in files:
-              if s > max_bytes:
-                  print(f"Attention: {p} fait {s/1024**3:.1f} Go (> limite), envoyé seul sans découpe.")
-              if current and size + s > max_bytes:
-                  batches.append(current)
-                  current, size = [], 0
-              current.append((p, s))
-              size += s
-          if current:
-              batches.append(current)
-
-          multi = len(batches) > 1
-          print(f"{len(files)} fichier(s) -> {len(batches)} partie(s)")
-
-          for i, batch in enumerate(batches, 1):
-              target = f"{dest}/part{i}" if multi else dest
-              print(f"\n=== Partie {i}/{len(batches)} -> {target} ===")
-              subprocess.run(["megatools", "mkdir", target], check=False)
-              for p, s in batch:
-                  rel = os.path.dirname(os.path.relpath(p, root))
-                  sub = f"{target}/{rel}" if rel else target
-                  if rel:
-                      subprocess.run(["megatools", "mkdir", sub], check=False)
-                  subprocess.run(["megatools", "put", "--no-progress", "--path", sub, p], check=True)
-                  os.remove(p)
-                  print(f"OK {os.path.basename(p)} ({s/1024**3:.2f} Go)")
+              rel = os.path.dirname(os.path.relpath(p, root))
+              sub = f"{dest}/{rel}" if rel else dest
+              if rel:
+                  subprocess.run(["megatools", "mkdir", sub], check=False)
+              subprocess.run(["megatools", "put", "--no-progress", "--path", sub, p], check=True)
+              os.remove(p)
+              print(f"OK {os.path.basename(p)} ({s/1024**3:.2f} Go)")
           print("\nTerminé.")
           PYEOF
           python3 upload.py
