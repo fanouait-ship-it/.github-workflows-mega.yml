@@ -1,23 +1,29 @@
 name: HLS vers MEGA
+
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Lien .m3u8"
+        description: "Lien .m3u8 complet"
         required: true
+        default: "https://prx-1590-for.vmnow.online/hls2/03/02225/6reetez3nyh5_n/index-v1-a1.m3u8?t=mL5DejohkMJckx98szsaVNSa9V2gbV5kML7VxKKfdjM=&s=1791483556&e=43200&v=&srv=rck3&i=0.4&sp=0&asn=36947"
       nom:
         description: "Nom du fichier (sans extension)"
         required: true
         default: "video"
       referer:
-        description: "Referer (optionnel, ex: https://site-d-origine.com/)"
+        description: "Referer ou Origin (optionnel)"
         required: false
+        default: "https://vmnow.online/"
 
 jobs:
   upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180 # Augmenté à 3h au cas où la vidéo est très longue
     steps:
+      - name: Vérifier l'espace disque disponible
+        run: df -h
+
       - name: Installer ffmpeg et rclone
         run: sudo apt-get update && sudo apt-get install -y ffmpeg rclone
 
@@ -27,13 +33,26 @@ jobs:
           NOM: ${{ inputs.nom }}
           REFERER: ${{ inputs.referer }}
         run: |
+          echo "Début du téléchargement de la vidéo..."
+          
+          # Construction des en-têtes pour ffmpeg
+          # Un User-Agent est souvent obligatoire pour ce type de flux protégé
+          HEADERS="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          
           if [ -n "$REFERER" ]; then
-            ffmpeg -headers "Referer: $REFERER"$'\r\n' -i "$URL" \
-              -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
-          else
-            ffmpeg -i "$URL" -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
+            HEADERS="$HEADERS\r\nReferer: $REFERER\r\nOrigin: $(echo $REFERER | awk -F/ '{print $1"//"$3}')"
           fi
-          ls -lh "$NOM.mp4"
+
+          # Lancement de ffmpeg avec gestion des en-têtes
+          ffmpeg -headers "$HEADERS" -i "$URL" -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
+          
+          # Vérification si le fichier a bien été créé et n'est pas vide
+          if [ -f "$NOM.mp4" ] && [ -s "$NOM.mp4" ]; then
+            ls -lh "$NOM.mp4"
+          else
+            echo "Erreur : Le fichier vidéo n'a pas pu être téléchargé ou est vide."
+            exit 1
+          fi
 
       - name: Envoyer sur MEGA
         env:
@@ -41,7 +60,12 @@ jobs:
           MEGA_PASS: ${{ secrets.MEGA_PASS }}
           NOM: ${{ inputs.nom }}
         run: |
+          echo "Configuration de Rclone pour MEGA..."
           export RCLONE_CONFIG_MEGA_TYPE=mega
           export RCLONE_CONFIG_MEGA_USER="$MEGA_USER"
           export RCLONE_CONFIG_MEGA_PASS="$(rclone obscure "$MEGA_PASS")"
-          rclone copyto "$NOM.mp4" "mega:Videos/$NOM.mp4" -P
+          
+          echo "Envoi du fichier vers MEGA (dossier Videos)..."
+          rclone copyto "$NOM.mp4" "mega:Videos/$NOM.mp4" -P --stats-one-line
+          
+          echo "Téléversement terminé avec succès !"
