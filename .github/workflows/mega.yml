@@ -1,13 +1,20 @@
-name: Torrent vers MEGA
+name: Torrent / Lien vers MEGA
 
 on:
   workflow_dispatch:
     inputs:
       lien:
-        description: "Magnet, URL .torrent ou lien direct"
+        description: "Magnet, .torrent, lien direct ou .m3u8"
         required: true
       fichiers:
-        description: "Index des fichiers à prendre (ex: 1,3-5). Vide = tout"
+        description: "Torrent seulement : index des fichiers (ex: 1,3-5). Vide = tout"
+        required: false
+      nom:
+        description: "m3u8 seulement : nom du fichier (sans extension)"
+        required: false
+        default: "video"
+      referer:
+        description: "m3u8 seulement : Referer si le site l'exige (optionnel)"
         required: false
 
 jobs:
@@ -16,18 +23,29 @@ jobs:
     timeout-minutes: 340
     steps:
       - name: Installer les outils
-        run: sudo apt-get update && sudo apt-get install -y aria2 megatools
+        run: sudo apt-get update && sudo apt-get install -y aria2 megatools ffmpeg
 
       - name: Télécharger
         env:
           LIEN: ${{ inputs.lien }}
           FICHIERS: ${{ inputs.fichiers }}
+          NOM: ${{ inputs.nom }}
+          REFERER: ${{ inputs.referer }}
         run: |
           mkdir -p dl && cd dl
-          OPT=""
-          [ -n "$FICHIERS" ] && OPT="--select-file=$FICHIERS"
-          aria2c --seed-time=0 --file-allocation=none \
-            --bt-stop-timeout=600 -x16 -s16 $OPT "$LIEN"
+          if [[ "$LIEN" == *".m3u8"* ]]; then
+            HDR=""
+            [ -n "$REFERER" ] && HDR="Referer: $REFERER"$'\r\n'
+            ffmpeg -nostdin -loglevel warning -stats \
+              -user_agent "Mozilla/5.0" -headers "$HDR" \
+              -i "$LIEN" -c copy -bsf:a aac_adtstoasc "${NOM:-video}.mp4"
+          else
+            OPT=""
+            [ -n "$FICHIERS" ] && OPT="--select-file=$FICHIERS"
+            aria2c --seed-time=0 --file-allocation=none \
+              --bt-stop-timeout=600 -x16 -s16 $OPT "$LIEN"
+          fi
+          ls -lh
 
       - name: Envoyer sur MEGA (racine)
         env:
