@@ -9,6 +9,9 @@ on:
       fichiers:
         description: "Torrent : numéros à garder (ex: 1,3-5). Vide = tout"
         required: false
+      referer:
+        description: "Referer (page du lecteur vidéo), optionnel"
+        required: false
 
 jobs:
   transfert:
@@ -17,6 +20,7 @@ jobs:
     env:
       LIEN: ${{ inputs.url }}
       SELECTION: ${{ inputs.fichiers }}
+      REFERER: ${{ inputs.referer }}
       MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
       MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
     steps:
@@ -28,8 +32,10 @@ jobs:
       - name: Télécharger
         run: |
           mkdir dl
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
           if [[ "$LIEN" == *.m3u8* ]]; then
             ffmpeg -hide_banner -loglevel warning -stats \
+              -user_agent "$UA" ${REFERER:+-referer "$REFERER"} \
               -i "$LIEN" -c copy -bsf:a aac_adtstoasc dl/video.mp4
           else
             ARGS=(-d dl --seed-time=0 -x16 -s16 --file-allocation=none
