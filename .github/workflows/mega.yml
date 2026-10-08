@@ -1,62 +1,46 @@
-name: Vers MEGA
+name: Torrent vers MEGA
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Lien direct, m3u8, magnet ou URL d'un .torrent"
+      lien:
+        description: "Magnet, URL .torrent ou lien direct"
         required: true
       fichiers:
-        description: "Torrent : numéros à garder (ex: 1,3-5). Vide = tout"
-        required: false
-      referer:
-        description: "Referer (page du lecteur vidéo), optionnel"
+        description: "Index des fichiers à prendre (ex: 1,3-5). Vide = tout"
         required: false
 
 jobs:
   transfert:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
-    env:
-      LIEN: ${{ inputs.url }}
-      SELECTION: ${{ inputs.fichiers }}
-      REFERER: ${{ inputs.referer }}
-      MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-      MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+    timeout-minutes: 340
     steps:
       - name: Installer les outils
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 megatools ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y aria2 megatools
 
       - name: Télécharger
+        env:
+          LIEN: ${{ inputs.lien }}
+          FICHIERS: ${{ inputs.fichiers }}
         run: |
-          mkdir dl
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-          if [[ "$LIEN" == *.m3u8* ]]; then
-            ffmpeg -hide_banner -loglevel warning -stats \
-              -user_agent "$UA" ${REFERER:+-referer "$REFERER"} \
-              -i "$LIEN" -c copy -bsf:a aac_adtstoasc dl/video.mp4
-          else
-            ARGS=(-d dl --seed-time=0 -x16 -s16 --file-allocation=none
-                  --summary-interval=30 --bt-stop-timeout=600)
-            if [ -n "$SELECTION" ]; then ARGS+=(--select-file="$SELECTION"); fi
-            aria2c "${ARGS[@]}" "$LIEN"
-          fi
-          df -h .
+          mkdir -p dl && cd dl
+          OPT=""
+          [ -n "$FICHIERS" ] && OPT="--select-file=$FICHIERS"
+          aria2c --seed-time=0 --file-allocation=none \
+            --bt-stop-timeout=600 -x16 -s16 $OPT "$LIEN"
 
-      - name: Envoyer à la racine de MEGA
+      - name: Envoyer sur MEGA (racine)
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          printf "[Login]\nUsername = %s\nPassword = %s\n" \
-            "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
-          find dl -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.avi' \
-            -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.m4v' \) -print0 |
+          cd dl
+          find . -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print0 |
           while IFS= read -r -d '' f; do
-            echo "Envoi : $f"
             for i in 1 2 3; do
-              megatools put --no-progress --path /Root "$f" && break
-              echo "Échec, nouvelle tentative ($i/3)"; sleep 20
+              megatools put --no-progress --path /Root \
+                -u "$MEGA_EMAIL" -p "$MEGA_PASSWORD" "$f" && break
+              sleep 30
             done
             rm -f "$f"
           done
-          rm -f ~/.megarc
