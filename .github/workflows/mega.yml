@@ -1,64 +1,47 @@
-name: Torrent / Lien vers MEGA
-
+name: HLS vers MEGA
 on:
   workflow_dispatch:
     inputs:
-      lien:
-        description: "Magnet, .torrent, lien direct ou .m3u8"
+      url:
+        description: "Lien .m3u8"
         required: true
-      fichiers:
-        description: "Torrent seulement : index des fichiers (ex: 1,3-5). Vide = tout"
-        required: false
       nom:
-        description: "m3u8 seulement : nom du fichier (sans extension)"
-        required: false
+        description: "Nom du fichier (sans extension)"
+        required: true
         default: "video"
       referer:
-        description: "m3u8 seulement : Referer si le site l'exige (optionnel)"
+        description: "Referer (optionnel, ex: https://site-d-origine.com/)"
         required: false
 
 jobs:
-  transfert:
+  upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 120
     steps:
-      - name: Installer les outils
-        run: sudo apt-get update && sudo apt-get install -y aria2 megatools ffmpeg
+      - name: Installer ffmpeg et rclone
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg rclone
 
-      - name: Télécharger
+      - name: Télécharger la vidéo HLS
         env:
-          LIEN: ${{ inputs.lien }}
-          FICHIERS: ${{ inputs.fichiers }}
+          URL: ${{ inputs.url }}
           NOM: ${{ inputs.nom }}
           REFERER: ${{ inputs.referer }}
         run: |
-          mkdir -p dl && cd dl
-          if [[ "$LIEN" == *".m3u8"* ]]; then
-            HDR=""
-            [ -n "$REFERER" ] && HDR="Referer: $REFERER"$'\r\n'
-            ffmpeg -nostdin -loglevel warning -stats \
-              -user_agent "Mozilla/5.0" -headers "$HDR" \
-              -i "$LIEN" -c copy -bsf:a aac_adtstoasc "${NOM:-video}.mp4"
+          if [ -n "$REFERER" ]; then
+            ffmpeg -headers "Referer: $REFERER"$'\r\n' -i "$URL" \
+              -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
           else
-            OPT=""
-            [ -n "$FICHIERS" ] && OPT="--select-file=$FICHIERS"
-            aria2c --seed-time=0 --file-allocation=none \
-              --bt-stop-timeout=600 -x16 -s16 $OPT "$LIEN"
+            ffmpeg -i "$URL" -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
           fi
-          ls -lh
+          ls -lh "$NOM.mp4"
 
-      - name: Envoyer sur MEGA (racine)
+      - name: Envoyer sur MEGA
         env:
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          MEGA_USER: ${{ secrets.MEGA_USER }}
+          MEGA_PASS: ${{ secrets.MEGA_PASS }}
+          NOM: ${{ inputs.nom }}
         run: |
-          cd dl
-          find . -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print0 |
-          while IFS= read -r -d '' f; do
-            for i in 1 2 3; do
-              megatools put --no-progress --path /Root \
-                -u "$MEGA_EMAIL" -p "$MEGA_PASSWORD" "$f" && break
-              sleep 30
-            done
-            rm -f "$f"
-          done
+          export RCLONE_CONFIG_MEGA_TYPE=mega
+          export RCLONE_CONFIG_MEGA_USER="$MEGA_USER"
+          export RCLONE_CONFIG_MEGA_PASS="$(rclone obscure "$MEGA_PASS")"
+          rclone copyto "$NOM.mp4" "mega:Videos/$NOM.mp4" -P
