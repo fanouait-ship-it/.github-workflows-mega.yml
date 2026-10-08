@@ -1,132 +1,56 @@
-name: Download to MEGA
+name: Vers MEGA
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Lien direct, .torrent, magnet ou .m3u8"
+        description: "Lien direct, m3u8, magnet ou URL d'un .torrent"
         required: true
-      mega_folder:
-        description: "Dossier de destination sur MEGA"
-        required: true
-        default: "Videos"
-      list_only:
-        description: "Torrent : lister les fichiers (numéros) sans télécharger"
-        type: boolean
-        default: false
-      select_files:
-        description: "Torrent : numéros à télécharger (ex: 3 ou 1,4,7 ou 2-5,9). Vide = tout"
+      fichiers:
+        description: "Torrent : numéros à garder (ex: 1,3-5). Vide = tout"
         required: false
-        default: ""
-      filename:
-        description: "m3u8 : nom du fichier de sortie (sans extension)"
-        required: false
-        default: "video"
-      referer:
-        description: "m3u8 : Referer si le site l'exige (optionnel)"
-        required: false
-        default: ""
 
 jobs:
-  transfer:
+  transfert:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
+    env:
+      LIEN: ${{ inputs.url }}
+      SELECTION: ${{ inputs.fichiers }}
+      MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+      MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
     steps:
       - name: Installer les outils
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 megatools ffmpeg
 
-      - name: Lister les fichiers du torrent
-        if: ${{ inputs.list_only }}
-        env:
-          URL: ${{ inputs.url }}
-        run: |
-          mkdir -p meta
-          case "$URL" in
-            magnet:*)
-              aria2c --dir=meta --bt-metadata-only=true --bt-save-metadata=true \
-                --bt-stop-timeout=300 "$URL"
-              ;;
-            *)
-              aria2c --dir=meta --follow-torrent=false "$URL"
-              ;;
-          esac
-          for t in meta/*.torrent; do
-            aria2c -S "$t"
-          done
-
-      - name: Configurer MEGA
-        if: ${{ !inputs.list_only }}
-        env:
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
-        run: |
-          printf "[Login]\nUsername = %s\nPassword = %s\n" "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
-          chmod 600 ~/.megarc
-
       - name: Télécharger
-        if: ${{ !inputs.list_only }}
-        env:
-          URL: ${{ inputs.url }}
-          SELECT: ${{ inputs.select_files }}
-          NAME: ${{ inputs.filename }}
-          REFERER: ${{ inputs.referer }}
         run: |
-          mkdir -p downloads
-          case "$URL" in
-            *.m3u8*)
-              echo "Flux HLS détecté -> ffmpeg"
-              args=(-nostdin -loglevel warning -stats -user_agent "Mozilla/5.0")
-              [ -n "$REFERER" ] && args+=(-referer "$REFERER")
-              ffmpeg "${args[@]}" -i "$URL" -c copy "downloads/${NAME:-video}.mp4"
-              ;;
-            *)
-              args=(--dir=downloads --seed-time=0 --file-allocation=none
-                    --max-connection-per-server=16 --split=16
-                    --bt-stop-timeout=600 --summary-interval=30)
-              [ -n "$SELECT" ] && args+=(--select-file="$SELECT")
-              aria2c "${args[@]}" "$URL"
-              ;;
-          esac
+          mkdir dl
+          if [[ "$LIEN" == *.m3u8* ]]; then
+            ffmpeg -hide_banner -loglevel warning -stats \
+              -i "$LIEN" -c copy -bsf:a aac_adtstoasc dl/video.mp4
+          else
+            ARGS=(-d dl --seed-time=0 -x16 -s16 --file-allocation=none
+                  --summary-interval=30 --bt-stop-timeout=600)
+            if [ -n "$SELECTION" ]; then ARGS+=(--select-file="$SELECTION"); fi
+            aria2c "${ARGS[@]}" "$LIEN"
+          fi
           df -h .
 
-      - name: Envoyer sur MEGA
-        if: ${{ !inputs.list_only }}
-        env:
-          MEGA_FOLDER: ${{ inputs.mega_folder }}
+      - name: Envoyer à la racine de MEGA
         run: |
-          cat > upload.py << 'PYEOF'
-          import os
-          import subprocess
-          import sys
-
-          root = "downloads"
-          dest = "/Root/" + os.environ["MEGA_FOLDER"].strip("/")
-
-          files = []
-          for d, _, names in os.walk(root):
-              for n in names:
-                  if n.endswith(".aria2"):
-                      continue
-                  p = os.path.join(d, n)
-                  files.append((p, os.path.getsize(p)))
-          files.sort()
-
-          if not files:
-              sys.exit("Aucun fichier téléchargé.")
-
-          print(f"{len(files)} fichier(s) à envoyer vers {dest}")
-          subprocess.run(["megatools", "mkdir", dest], check=False)
-
-          for p, s in files:
-              rel = os.path.dirname(os.path.relpath(p, root))
-              sub = f"{dest}/{rel}" if rel else dest
-              if rel:
-                  subprocess.run(["megatools", "mkdir", sub], check=False)
-              subprocess.run(["megatools", "put", "--no-progress", "--path", sub, p], check=True)
-              os.remove(p)
-              print(f"OK {os.path.basename(p)} ({s/1024**3:.2f} Go)")
-          print("\nTerminé.")
-          PYEOF
-          python3 upload.py
+          printf "[Login]\nUsername = %s\nPassword = %s\n" \
+            "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
+          find dl -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.avi' \
+            -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.m4v' \) -print0 |
+          while IFS= read -r -d '' f; do
+            echo "Envoi : $f"
+            for i in 1 2 3; do
+              megatools put --no-progress --path /Root "$f" && break
+              echo "Échec, nouvelle tentative ($i/3)"; sleep 20
+            done
+            rm -f "$f"
+          done
+          rm -f ~/.megarc
