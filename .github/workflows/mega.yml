@@ -19,38 +19,40 @@ on:
 jobs:
   upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # Augmenté à 3h au cas où la vidéo est très longue
+    timeout-minutes: 180
     steps:
       - name: Vérifier l'espace disque disponible
         run: df -h
 
-      - name: Installer ffmpeg et rclone
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg rclone
+      - name: Installer yt-dlp, ffmpeg et rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg rclone
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
 
-      - name: Télécharger la vidéo HLS
+      - name: Télécharger la vidéo HLS avec yt-dlp
         env:
           URL: ${{ inputs.url }}
           NOM: ${{ inputs.nom }}
           REFERER: ${{ inputs.referer }}
         run: |
-          echo "Début du téléchargement de la vidéo..."
+          echo "Téléchargement en cours avec yt-dlp..."
           
-          # Construction des en-têtes pour ffmpeg
-          # Un User-Agent est souvent obligatoire pour ce type de flux protégé
-          HEADERS="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          
+          EXTRA_ARGS=""
           if [ -n "$REFERER" ]; then
-            HEADERS="$HEADERS\r\nReferer: $REFERER\r\nOrigin: $(echo $REFERER | awk -F/ '{print $1"//"$3}')"
+            EXTRA_ARGS="--referer $REFERER --add-header Origin:$(echo $REFERER | awk -F/ '{print $1"//"$3}')"
           fi
 
-          # Lancement de ffmpeg avec gestion des en-têtes
-          ffmpeg -headers "$HEADERS" -i "$URL" -c copy -bsf:a aac_adtstoasc "$NOM.mp4"
-          
-          # Vérification si le fichier a bien été créé et n'est pas vide
+          yt-dlp "$URL" \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            $EXTRA_ARGS \
+            -o "$NOM.mp4"
+
           if [ -f "$NOM.mp4" ] && [ -s "$NOM.mp4" ]; then
             ls -lh "$NOM.mp4"
           else
-            echo "Erreur : Le fichier vidéo n'a pas pu être téléchargé ou est vide."
+            echo "Erreur : Le fichier vidéo n'a pas pu être téléchargé."
             exit 1
           fi
 
@@ -65,7 +67,7 @@ jobs:
           export RCLONE_CONFIG_MEGA_USER="$MEGA_USER"
           export RCLONE_CONFIG_MEGA_PASS="$(rclone obscure "$MEGA_PASS")"
           
-          echo "Envoi du fichier vers MEGA (dossier Videos)..."
+          echo "Envoi du fichier vers MEGA..."
           rclone copyto "$NOM.mp4" "mega:Videos/$NOM.mp4" -P --stats-one-line
           
           echo "Téléversement terminé avec succès !"
