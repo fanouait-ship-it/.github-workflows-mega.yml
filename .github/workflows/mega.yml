@@ -1,92 +1,37 @@
-name: Download to MEGA
 
+name: Télécharger vers Mega
 on:
   workflow_dispatch:
     inputs:
       source:
-        description: "Magnet, URL .torrent, lien direct ou lien HLS (.m3u8)"
+        description: "URL .m3u8, magnet: ou URL .torrent"
         required: true
-        type: string
-      filename:
-        description: "Nom du fichier de sortie pour un .m3u8 (sans extension)"
-        required: false
-        default: "video"
-        type: string
-      referer:
-        description: "Referer HTTP (optionnel, si le serveur HLS l'exige)"
-        required: false
-        default: ""
-        type: string
-      mega_dir:
-        description: "Dossier de destination sur MEGA"
-        required: false
-        default: "/Downloads"
-        type: string
 
 jobs:
-  download-to-mega:
+  dl:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # limite GitHub : 360 min max par job
-
     steps:
-      - name: Libérer de l'espace disque
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          df -h /
-
-      - name: Installer aria2, ffmpeg et MEGAcmd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 ffmpeg
-          wget -q https://mega.nz/linux/repo/xUbuntu_24.04/amd64/megacmd-xUbuntu_24.04_amd64.deb
-          sudo apt-get install -y ./megacmd-xUbuntu_24.04_amd64.deb
+      - name: Installer les outils
+        run: sudo apt-get update && sudo apt-get install -y megatools aria2
 
       - name: Télécharger
         env:
-          SOURCE: ${{ inputs.source }}
-          FILENAME: ${{ inputs.filename }}
-          REFERER: ${{ inputs.referer }}
+          SRC: ${{ inputs.source }}
         run: |
-          mkdir -p downloads
-
-          if [[ "$SOURCE" == *.m3u8* ]]; then
-            echo "==> Flux HLS détecté, téléchargement avec ffmpeg"
-            HEADERS=()
-            if [[ -n "$REFERER" ]]; then
-              HEADERS=(-headers "Referer: $REFERER"$'\r\n')
-            fi
-            ffmpeg -hide_banner -loglevel info -stats \
-              "${HEADERS[@]}" \
-              -user_agent "Mozilla/5.0" \
-              -i "$SOURCE" \
-              -c copy -bsf:a aac_adtstoasc \
-              "downloads/${FILENAME:-video}.mp4"
+          mkdir dl
+          if [[ "$SRC" == *.m3u8* ]]; then
+            ffmpeg -i "$SRC" -c copy -bsf:a aac_adtstoasc dl/video.mp4
           else
-            echo "==> Magnet / torrent / lien direct, téléchargement avec aria2"
-            aria2c \
-              --dir=downloads \
-              --seed-time=0 \
-              --file-allocation=none \
-              --summary-interval=60 \
-              --bt-stop-timeout=600 \
-              --max-connection-per-server=8 \
-              "$SOURCE"
-            rm -f downloads/*.aria2
+            aria2c -d dl --seed-time=0 --bt-stop-timeout=600 \
+              --file-allocation=none "$SRC"
           fi
 
-          ls -lah downloads
-
-      - name: Envoyer sur MEGA
+      - name: Envoyer sur Mega
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
-          MEGA_DIR: ${{ inputs.mega_dir }}
         run: |
-          mega-login "$MEGA_EMAIL" "$MEGA_PASSWORD"
-          mega-mkdir -p "$MEGA_DIR" || true
-          for item in downloads/*; do
-            echo "Upload : $item"
-            mega-put -c "$item" "$MEGA_DIR/"
-          done
-          mega-transfers --only-uploads || true
-          mega-logout
+          find dl -type f ! -name "*.aria2" -print0 | \
+            xargs -0 -I{} megatools put \
+              --username "$MEGA_EMAIL" --password "$MEGA_PASSWORD" \
+              --path /Root/ "{}"
