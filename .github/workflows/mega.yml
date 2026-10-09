@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: "URL .m3u8, magnet: ou URL .torrent"
+        description: "URL .m3u8, magnet:, .torrent ou lien MediaFire (fichier/dossier)"
         required: true
 
 jobs:
@@ -18,7 +18,65 @@ jobs:
           SRC: ${{ inputs.source }}
         run: |
           mkdir dl
-          if [[ "$SRC" == *.m3u8* ]]; then
+          if [[ "$SRC" == *mediafire.com/* ]]; then
+            python3 - <<'PY'
+          import base64, os, re, subprocess, sys
+          import requests
+
+          SRC = os.environ["SRC"]
+          API = "https://www.mediafire.com/api/1.5/folder/get_content.php"
+          s = requests.Session()
+          s.headers["User-Agent"] = "Mozilla/5.0"
+
+          def list_items(key, ctype):
+              out, chunk = [], 1
+              while True:
+                  r = s.get(API, params={
+                      "folder_key": key, "content_type": ctype,
+                      "chunk": chunk, "chunk_size": 100,
+                      "response_format": "json"}).json()["response"]
+                  c = r["folder_content"]
+                  out += c.get(ctype, [])
+                  if c.get("more_chunks") != "yes":
+                      return out
+                  chunk += 1
+
+          def direct_link(page_url):
+              html = s.get(page_url).text
+              m = re.search(r'data-scrambled-url="([^"]+)"', html)
+              if m:
+                  return base64.b64decode(m.group(1)).decode()
+              m = re.search(r'href="(https?://download[^"]+)"', html)
+              return m.group(1) if m else None
+
+          def fetch(page_url, dest, name=None):
+              link = direct_link(page_url)
+              if not link:
+                  print("Lien direct introuvable:", page_url)
+                  return
+              os.makedirs(dest, exist_ok=True)
+              cmd = ["aria2c", "-x", "8", "-s", "8", "--file-allocation=none",
+                     "-d", dest]
+              if name:
+                  cmd += ["-o", name]
+              subprocess.run(cmd + [link], check=True)
+
+          def walk(key, dest):
+              for f in list_items(key, "files"):
+                  print("->", f["filename"])
+                  fetch(f["links"]["normal_download"], dest, f["filename"])
+              for d in list_items(key, "folders"):
+                  walk(d["folderkey"], os.path.join(dest, d["name"]))
+
+          m = re.search(r"mediafire\.com/folder/([A-Za-z0-9]+)", SRC)
+          if m:
+              walk(m.group(1), "dl")
+          elif "/file" in SRC or "/view/" in SRC or "/download/" in SRC:
+              fetch(SRC, "dl")
+          else:
+              sys.exit("Lien MediaFire non reconnu")
+          PY
+          elif [[ "$SRC" == *.m3u8* ]]; then
             ffmpeg -i "$SRC" -c copy -bsf:a aac_adtstoasc dl/video.mp4
           else
             aria2c -d dl --seed-time=0 --bt-stop-timeout=600 \
