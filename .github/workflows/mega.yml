@@ -1,4 +1,3 @@
-
 name: Télécharger vers Mega
 on:
   workflow_dispatch:
@@ -12,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Installer les outils
-        run: sudo apt-get update && sudo apt-get install -y megatools aria2
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg megatools aria2
 
       - name: Télécharger
         env:
