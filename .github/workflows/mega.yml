@@ -6,6 +6,10 @@ on:
       source:
         description: "Lien magnet ou URL du .torrent"
         required: true
+      dossier:
+        description: "Dossier de destination sur MEGA"
+        required: false
+        default: "Torrents"
 
 jobs:
   transfer:
@@ -13,26 +17,49 @@ jobs:
     timeout-minutes: 340
 
     steps:
-      - name: Installer les outils
+      - name: Installer aria2 et rclone officiel
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 rclone
+          sudo apt-get remove -y rclone || true
+          sudo apt-get install -y aria2 unzip
+          curl -fsSL -o rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q rclone.zip
+          sudo install -m 755 rclone-*-linux-amd64/rclone /usr/local/bin/rclone
+          hash -r
+          rclone version
+          rclone help backends | grep -i mega
 
       - name: Télécharger le torrent
         env:
           SOURCE: ${{ inputs.source }}
         run: |
           mkdir -p dl
-          aria2c --dir=dl --seed-time=0 \
+          aria2c --dir=dl \
+            --seed-time=0 \
             --bt-stop-timeout=600 \
-            --max-connection-per-server=4 \
+            --file-allocation=none \
+            --summary-interval=60 \
+            --bt-tracker="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce" \
             "$SOURCE"
+          echo "Contenu téléchargé :"
+          du -sh dl
+          ls -la dl
+          test -n "$(ls -A dl)"
+
+      - name: Configurer MEGA
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+        run: |
+          rclone config create mega mega user "$MEGA_EMAIL" pass "$MEGA_PASSWORD" --non-interactive
+          rclone lsd mega:
 
       - name: Envoyer sur MEGA
         env:
-          RCLONE_CONFIG_MEGA_TYPE: mega
-          RCLONE_CONFIG_MEGA_USER: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          DEST: ${{ inputs.dossier }}
         run: |
-          export RCLONE_CONFIG_MEGA_PASS="$(rclone obscure "$MEGA_PASSWORD")"
-          rclone copy dl mega:Torrents --transfers 2 -v
+          rclone copy dl "mega:$DEST" \
+            --exclude "*.torrent" \
+            --transfers 2 \
+            --stats 30s \
+            -v
