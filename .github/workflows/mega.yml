@@ -1,36 +1,63 @@
+
 name: Télécharger vers Mega
 on:
   workflow_dispatch:
     inputs:
       source:
-        description: "URL .m3u8, magnet: ou URL .torrent"
-        required: true
+        description: "URL .m3u8, magnet: ou URL .torrent (laisser vide si fichier fourni)"
+        required: false
+      torrent_file:
+        description: "Chemin d'un .torrent dans le repo (ex: torrents/a.torrent)"
+        required: false
+      torrent_b64:
+        description: "Contenu du .torrent en base64"
+        required: false
 
 jobs:
   dl:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Installer les outils
         run: sudo apt-get update && sudo apt-get install -y ffmpeg megatools aria2
 
       - name: Télécharger
+        shell: bash
         env:
           SRC: ${{ inputs.source }}
+          TORRENT_PATH: ${{ inputs.torrent_file }}
+          TORRENT_B64: ${{ inputs.torrent_b64 }}
         run: |
+          set -euo pipefail
           mkdir dl
-          if [[ "$SRC" == *.m3u8* ]]; then
+          ARIA=(aria2c -d dl --seed-time=0 --bt-stop-timeout=600 --file-allocation=none)
+
+          if [ -n "$TORRENT_B64" ]; then
+            echo "$TORRENT_B64" | base64 -d > "$RUNNER_TEMP/in.torrent"
+            "${ARIA[@]}" "$RUNNER_TEMP/in.torrent"
+          elif [ -n "$TORRENT_PATH" ]; then
+            test -f "$TORRENT_PATH" || { echo "Fichier introuvable: $TORRENT_PATH"; exit 1; }
+            "${ARIA[@]}" "$TORRENT_PATH"
+          elif [ -z "$SRC" ]; then
+            echo "Aucune source fournie"; exit 1
+          elif [[ "$SRC" == *.m3u8* ]]; then
             ffmpeg -i "$SRC" -c copy -bsf:a aac_adtstoasc dl/video.mp4
           else
-            aria2c -d dl --seed-time=0 --bt-stop-timeout=600 \
-              --file-allocation=none "$SRC"
+            "${ARIA[@]}" -- "$SRC"
           fi
 
+          find dl -type f \( -name "*.aria2" -o -name "*.torrent" \) -delete
+
       - name: Envoyer sur Mega
+        shell: bash
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          find dl -type f ! -name "*.aria2" -print0 | \
-            xargs -0 -I{} megatools put \
-              --username "$MEGA_EMAIL" --password "$MEGA_PASSWORD" \
-              --path /Root/ "{}"
+          set -euo pipefail
+          umask 077
+          printf '[Login]\nUsername = %s\nPassword = %s\n' \
+            "$MEGA_EMAIL" "$MEGA_PASSWORD" > ~/.megarc
+          megatools copy --no-progress --local dl --remote /Root/dl
+          rm -f ~/.megarc
