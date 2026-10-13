@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: "Lien magnet ou URL du .torrent"
+        description: "Magnet, .torrent, lien direct (mp4, mkv...) ou flux .m3u8"
         required: true
       dossier:
         description: "Dossier de destination sur MEGA"
@@ -17,30 +17,53 @@ jobs:
     timeout-minutes: 340
 
     steps:
-      - name: Installer aria2 et rclone officiel
+      - name: Installer aria2, ffmpeg et rclone officiel
         run: |
           sudo apt-get update
           sudo apt-get remove -y rclone || true
-          sudo apt-get install -y aria2 unzip
+          sudo apt-get install -y aria2 unzip ffmpeg
           curl -fsSL -o rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -q rclone.zip
           sudo install -m 755 rclone-*-linux-amd64/rclone /usr/local/bin/rclone
           hash -r
           rclone version
           rclone help backends | grep -i mega
+          ffmpeg -version | head -n 1
 
-      - name: Télécharger le torrent
+      - name: Télécharger la source
         env:
           SOURCE: ${{ inputs.source }}
         run: |
           mkdir -p dl
-          aria2c --dir=dl \
-            --seed-time=0 \
-            --bt-stop-timeout=600 \
-            --file-allocation=none \
-            --summary-interval=60 \
-            --bt-tracker="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce" \
-            "$SOURCE"
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          ORIGIN=$(echo "$SOURCE" | awk -F/ '{print $1"//"$3"/"}')
+          COMMON="--dir=dl --file-allocation=none --summary-interval=60 --auto-file-renaming=false"
+
+          if [[ "$SOURCE" == magnet:* ]] || [[ "$SOURCE" == *.torrent* ]]; then
+            aria2c $COMMON \
+              --seed-time=0 \
+              --bt-stop-timeout=600 \
+              --bt-tracker="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce" \
+              "$SOURCE"
+
+          elif [[ "$SOURCE" == *.m3u8* ]]; then
+            ffmpeg -nostdin -hide_banner -loglevel warning -stats \
+              -user_agent "$UA" \
+              -referer "$ORIGIN" \
+              -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
+              -i "$SOURCE" \
+              -c copy -bsf:a aac_adtstoasc \
+              dl/video.mp4
+
+          else
+            aria2c $COMMON \
+              -x 8 -s 8 -k 1M \
+              --max-tries=5 --retry-wait=10 \
+              --referer="$ORIGIN" \
+              --user-agent="$UA" \
+              "$SOURCE"
+          fi
+
           echo "Contenu téléchargé :"
           du -sh dl
           ls -la dl
